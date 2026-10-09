@@ -1,0 +1,497 @@
+--[=[
+    BankZa Mdz — Egg Flyer
+    LocalScript -> StarterPlayer > StarterPlayerScripts
+]=]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local CollectionService = game:GetService("CollectionService")
+local GuiService = game:GetService("GuiService")
+local VirtualUser = game:GetService("VirtualUser")
+
+local plr = Players.LocalPlayer
+local MAKER = "BankZa Mdz"
+
+local CFG = {
+	pin = nil, god = true, antiAfk = true,
+	spOn = false, spVal = 16,
+	keyword = "egg", liftCap = 90, liftMul = 0.12, speedMul = 3,
+	follow = false, keepDist = 30,
+}
+
+local char, hum, root
+local function refresh()
+	char = plr.Character
+	hum = char and char:FindFirstChildOfClass("Humanoid")
+	root = char and char:FindFirstChild("HumanoidRootPart")
+end
+plr.CharacterAdded:Connect(function() task.wait(0.7) refresh() end)
+refresh()
+
+-- ================= MOVEMENT =================
+local flight = { active = false }
+
+local function safeState(s)
+	if not (hum and hum.Parent) then return end
+	pcall(function() hum:ChangeState(s) end)
+end
+
+local function groundAt(p)
+	local pr = RaycastParams.new()
+	pr.FilterType = Enum.RaycastFilterType.Exclude
+	pr.FilterDescendantsInstances = { char }
+	local h = workspace:Raycast(p + Vector3.new(0, 80, 0), Vector3.new(0, -900, 0), pr)
+	if h then return h.Position + Vector3.new(0, 4, 0) end
+	return p
+end
+
+local function flyTo(dest, liftCap)
+	if flight.active then return false end
+	refresh()
+	if not (root and hum and root.Parent) then return false end
+	flight.active = true
+
+	local from = root.Position
+	local flat = Vector3.new(dest.X - from.X, 0, dest.Z - from.Z).Magnitude
+	local spd = math.max((CFG.spOn and CFG.spVal or hum.WalkSpeed) * CFG.speedMul, 45)
+	local dur = math.clamp(flat / spd, 0.25, 8)
+	local lift = math.clamp(flat * CFG.liftMul, 5, liftCap or CFG.liftCap)
+	local steps = math.clamp(math.floor(dur / 0.03), 12, 300)
+	local dir = dest - from
+	if dir.Magnitude <= 0.1 then dir = Vector3.new(0, 0, -1) else dir = dir.Unit end
+
+	local ok = true
+	for i = 1, steps do
+		if not (root and root.Parent) then ok = false break end
+		local t = i / steps
+		local pos = from:Lerp(dest, t) + Vector3.new(0, math.sin(t * math.pi) * lift, 0)
+		root.CFrame = CFrame.lookAt(pos, pos + dir)
+		if hum.Health < hum.MaxHealth then hum.Health = hum.MaxHealth end
+		task.wait(dur / steps)
+	end
+	if ok and root and root.Parent then
+		root.CFrame = CFrame.new(groundAt(dest))
+		root.AssemblyLinearVelocity = Vector3.zero
+		safeState(Enum.HumanoidStateType.Running)
+	else ok = false end
+	flight.active = false
+	return ok
+end
+
+local function goHome()
+	if not CFG.pin then return false end
+	return flyTo(CFG.pin.Position, 450)
+end
+
+-- ================= EGG SCANNER =================
+local eggs = {}
+
+local function partOf(o)
+	if o:IsA("BasePart") then return o end
+	return o.PrimaryPart or o:FindFirstChildWhichIsA("BasePart")
+end
+
+local function scanEggs()
+	eggs = {}
+	refresh()
+	if not root then return eggs end
+	local kw = CFG.keyword:lower()
+	if kw == "" then kw = "egg" end
+	local seen = {}
+	local function collect(o)
+		local rp = partOf(o)
+		if not rp then return end
+		local key = string.format("%d_%d_%d", math.floor(rp.Position.X/2), math.floor(rp.Position.Y/2), math.floor(rp.Position.Z/2))
+		if seen[key] then return end
+		seen[key] = true
+		eggs[#eggs+1] = { instance = o, position = rp.Position, name = o.Name, distance = (rp.Position - root.Position).Magnitude }
+	end
+	for _, t in ipairs(CollectionService:GetTagged("Egg")) do
+		if t.Name:lower():find(kw) then collect(t) end
+	end
+	for _, d in ipairs(workspace:GetDescendants()) do
+		if (d:IsA("Model") or d:IsA("BasePart")) and d.Name:lower():find(kw) then collect(d) end
+	end
+	table.sort(eggs, function(a, b) return a.distance > b.distance end)
+	return eggs
+end
+
+local function nearestEgg()
+	for i = #eggs, 1, -1 do
+		if eggs[i].instance and eggs[i].instance.Parent then return eggs[i] end
+	end
+	return nil
+end
+
+-- ================= THEME + HELPERS =================
+local C = {
+	bg = Color3.fromRGB(18,18,27), panel = Color3.fromRGB(30,30,42), alt = Color3.fromRGB(40,40,55),
+	accent = Color3.fromRGB(255,200,55), brand = Color3.fromRGB(132,26,155), brandDk = Color3.fromRGB(58,10,76),
+	text = Color3.fromRGB(240,240,248), dim = Color3.fromRGB(150,150,170),
+	ok = Color3.fromRGB(40,175,95), off = Color3.fromRGB(70,70,88), danger = Color3.fromRGB(190,50,50),
+}
+
+local function shade(c, a)
+	return Color3.fromRGB(
+		math.max(math.floor(c.R*255-a),0),
+		math.max(math.floor(c.G*255-a),0),
+		math.max(math.floor(c.B*255-a),0))
+end
+local function mk(class, props, parent)
+	local i = Instance.new(class)
+	if props then for k, v in pairs(props) do i[k] = v end end
+	if parent then i.Parent = parent end
+	return i
+end
+local function rnd(i, r) mk("UICorner", { CornerRadius = UDim.new(0, r or 8) }, i) end
+local function strk(i, c, t) mk("UIStroke", { Color = c or Color3.new(0,0,0), Thickness = t or 2, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, i) end
+local function grd(i, c1, c2, r) mk("UIGradient", { Color = ColorSequence.new(c1, c2), Rotation = r or 90 }, i) end
+local function tw(i, p, t)
+	local a = TweenService:Create(i, TweenInfo.new(t or 0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), p)
+	a:Play() return a
+end
+local function cst(i, mx, mn) mk("UITextSizeConstraint", { MaxTextSize = mx, MinTextSize = mn or 8 }, i) end
+local function lbl(parent, text, size, color, font)
+	return mk("TextLabel", {
+		BackgroundTransparency = 1, Text = text, TextSize = size,
+		TextColor3 = color or C.text, Font = font or Enum.Font.Gotham,
+		TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Center,
+		Size = UDim2.new(1,0,1,0),
+	}, parent)
+end
+
+-- ================= COMPONENTS =================
+local function btn(parent, text, click, tone, h)
+	tone = tone or C.brand
+	h = h or 38
+	local b = mk("TextButton", {
+		Size = UDim2.new(1,0,0,h), BackgroundColor3 = tone, Text = text,
+		TextColor3 = C.text, TextSize = 13, Font = Enum.Font.GothamBold,
+		BorderSizePixel = 0, AutoButtonColor = false, Selectable = false,
+	}, parent)
+	rnd(b, 8) strk(b) grd(b, tone, shade(tone,45), 90) cst(b, 14, 9)
+	b.MouseEnter:Connect(function() tw(b, { BackgroundColor3 = shade(tone,20) }) end)
+	b.MouseLeave:Connect(function() tw(b, { BackgroundColor3 = tone }) end)
+	b.MouseButton1Click:Connect(function() if click then click() end end)
+	return b
+end
+
+local function togg(parent, text, default, onChange)
+	local val = default and true or false
+	local row = mk("Frame", { Size = UDim2.new(1,0,0,36), BackgroundColor3 = C.panel, BorderSizePixel = 0 }, parent)
+	rnd(row, 8) strk(row)
+	local t = lbl(row, text, 13)
+	t.Position = UDim2.new(0,10,0,0) t.Size = UDim2.new(1,-70,1,0) cst(t, 13, 9)
+	local track = mk("Frame", { Size = UDim2.new(0,46,0,24), Position = UDim2.new(1,-54,0.5,-12), BackgroundColor3 = val and C.ok or C.off, BorderSizePixel = 0 }, row)
+	rnd(track, 12) strk(track)
+	local knob = mk("Frame", { Size = UDim2.new(0,18,0,18), Position = UDim2.new(val and 1 or 0, val and -21 or 3, 0.5,-9), BackgroundColor3 = C.text, BorderSizePixel = 0 }, track)
+	rnd(knob, 9)
+	local obj = {}
+	function obj.Set(v)
+		val = v and true or false
+		tw(track, { BackgroundColor3 = val and C.ok or C.off })
+		tw(knob, { Position = UDim2.new(val and 1 or 0, val and -21 or 3, 0.5,-9) })
+		if onChange then onChange(val) end
+	end
+	row.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then obj.Set(not val) end
+	end)
+	return obj
+end
+
+local function fmt(n)
+	if n == math.floor(n) then return tostring(math.floor(n)) end
+	return string.format("%.2f", n)
+end
+
+local function slider(parent, text, min, max, default, step, onChange)
+	local val, st = default or min, step or 1
+	local row = mk("Frame", { Size = UDim2.new(1,0,0,54), BackgroundTransparency = 1 }, parent)
+	local cap = mk("TextLabel", {
+		BackgroundTransparency = 1, Text = "", TextSize = 12, TextColor3 = C.text,
+		Font = Enum.Font.GothamBold, TextXAlignment = Enum.TextXAlignment.Left,
+		Size = UDim2.new(1,0,0,18), Position = UDim2.new(0,2,0,0),
+	}, row)
+	cst(cap, 12, 8)
+	local track = mk("Frame", { Size = UDim2.new(1,-14,0,8), Position = UDim2.new(0,7,0,32), BackgroundColor3 = C.panel, BorderSizePixel = 0, Active = true }, row)
+	rnd(track, 4)
+	local fill = mk("Frame", { Size = UDim2.new(0,0,1,0), BackgroundColor3 = C.accent, BorderSizePixel = 0 }, track)
+	rnd(fill, 4)
+	local thumb = mk("TextButton", { Size = UDim2.new(0,20,0,20), Position = UDim2.new(0,-10,0.5,-10), BackgroundColor3 = C.text, Text = "", BorderSizePixel = 0, AutoButtonColor = false, ZIndex = 3 }, track)
+	rnd(thumb, 10) strk(thumb, nil, 2)
+	local obj, dragging = {}, false
+	local function render(v, silent)
+		val = math.clamp(v, min, max)
+		val = math.floor(val / st) * st
+		local pct = (max-min) ~= 0 and math.clamp((val-min)/(max-min), 0, 1) or 0
+		fill.Size = UDim2.new(pct,0,1,0)
+		thumb.Position = UDim2.new(pct,-10,0.5,-10)
+		cap.Text = string.format("%s   %s", text, fmt(val))
+		if not silent and onChange then onChange(val) end
+	end
+	local function fromPtr(x)
+		local size = track.AbsoluteSize.X
+		if size <= 0 then return end
+		render(min + ((x - track.AbsolutePosition.X)/size) * (max-min))
+	end
+	track.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+			dragging = true fromPtr(i.Position.X)
+		end
+	end)
+	thumb.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = true end
+	end)
+	UserInputService.InputChanged:Connect(function(i)
+		if not dragging then return end
+		if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then fromPtr(i.Position.X) end
+	end)
+	UserInputService.InputEnded:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
+	end)
+	obj.Set = function(v) render(v, false) end
+	obj.Get = function() return val end
+	render(val, true)
+	return obj
+end
+
+local function txtbox(parent, text, ph, onSubmit)
+	local b = mk("TextBox", {
+		Size = UDim2.new(1,0,0,36), BackgroundColor3 = C.panel,
+		Text = text or "", PlaceholderText = ph or "",
+		TextColor3 = C.accent, PlaceholderColor3 = C.dim,
+		TextSize = 13, Font = Enum.Font.GothamBold,
+		ClearTextOnFocus = false, BorderSizePixel = 0,
+	}, parent)
+	rnd(b, 8) strk(b) cst(b, 13, 9)
+	b.FocusLost:Connect(function(e) if e and onSubmit then onSubmit(b.Text) end end)
+	return b
+end
+
+local function readout(parent, text, color)
+	local row = mk("Frame", { Size = UDim2.new(1,0,0,34), BackgroundColor3 = C.panel, BorderSizePixel = 0 }, parent)
+	rnd(row, 8) strk(row)
+	local t = lbl(row, text, 12, color or C.accent, Enum.Font.GothamBold)
+	t.Position = UDim2.new(0,10,0,0) t.Size = UDim2.new(1,-20,1,0)
+	t.TextTruncate = Enum.TextTruncate.AtEnd cst(t, 12, 8)
+	return { Set = function(_, v) t.Text = tostring(v) end }
+end
+
+local function header(parent, text)
+	local t = lbl(parent, text, 13, C.accent, Enum.Font.GothamBold)
+	t.Position = UDim2.new(0,4,0,0) t.Size = UDim2.new(1,-8,0,22)
+	cst(t, 13, 9) return t
+end
+
+-- ================= GUI ROOT =================
+local inset = 12
+pcall(function() inset = math.max((GuiService:GetGuiInset()).Y + 8, 12) end)
+
+local gui = mk("ScreenGui", {
+	Name = "BankZaMdzUI", ResetOnSpawn = false,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	DisplayOrder = 50, IgnoreGuiInset = false,
+}, plr:WaitForChild("PlayerGui"))
+
+local WW, WH, SW = 470, 306, 108
+
+local win = mk("Frame", {
+	Size = UDim2.new(0,WW,0,WH), Position = UDim2.new(0.5,-WW/2,0,inset),
+	BackgroundColor3 = C.bg, BorderSizePixel = 0, Active = true,
+}, gui)
+rnd(win, 12) strk(win, nil, 3)
+
+local bar = mk("Frame", { Size = UDim2.new(1,0,0,34), BackgroundColor3 = C.brand, BorderSizePixel = 0, Active = true }, win)
+rnd(bar, 12) mk("UIPadding", { BottomPixel = 12 }, bar) grd(bar, C.brand, C.brandDk, 0)
+
+local title = mk("TextLabel", {
+	BackgroundTransparency = 1, Text = MAKER .. "  |  Egg Flyer",
+	TextSize = 14, TextColor3 = C.accent, Font = Enum.Font.GothamBlack,
+	TextXAlignment = Enum.TextXAlignment.Left, Size = UDim2.new(1,-80,1,0),
+	Position = UDim2.new(0,12,0,0), TextTruncate = Enum.TextTruncate.AtEnd,
+}, bar)
+cst(title, 14, 9)
+
+local closeBtn = mk("TextButton", {
+	Size = UDim2.new(0,28,0,24), Position = UDim2.new(1,-32,0,5),
+	BackgroundColor3 = C.alt, Text = "X", TextSize = 13,
+	TextColor3 = C.danger, Font = Enum.Font.GothamBlack, BorderSizePixel = 0,
+}, bar)
+rnd(closeBtn, 6)
+
+local reopenBtn = mk("TextButton", {
+	Size = UDim2.new(0,56,0,56), Position = UDim2.new(1,-64,0,inset),
+	BackgroundColor3 = C.brand, Text = "BZ", TextSize = 18,
+	TextColor3 = C.accent, Font = Enum.Font.GothamBlack,
+	BorderSizePixel = 0, Visible = false, ZIndex = 60,
+}, gui)
+rnd(reopenBtn, 14) strk(reopenBtn, nil, 3) grd(reopenBtn, C.brand, C.brandDk, 45)
+
+closeBtn.MouseButton1Click:Connect(function()
+	win.Visible = false
+	reopenBtn.Visible = true
+end)
+reopenBtn.MouseButton1Click:Connect(function()
+	win.Visible = true
+	reopenBtn.Visible = false
+end)
+
+-- ================= SIDEBAR =================
+local sidebar = mk("Frame", {
+	Size = UDim2.new(0,SW,1,-46), Position = UDim2.new(0,8,0,40),
+	BackgroundColor3 = C.panel, BorderSizePixel = 0,
+}, win)
+rnd(sidebar, 8) strk(sidebar)
+mk("UIListLayout", { Padding = UDim.new(0,6), SortOrder = Enum.SortOrder.LayoutOrder }, sidebar)
+mk("UIPadding", { PaddingTop = UDim.new(0,8), PaddingLeft = UDim.new(0,6), PaddingRight = UDim.new(0,6) }, sidebar)
+
+mk("TextLabel", {
+	BackgroundTransparency = 1, Text = MAKER, TextSize = 11, TextColor3 = C.accent,
+	Font = Enum.Font.GothamBlack, TextXAlignment = Enum.TextXAlignment.Center,
+	Size = UDim2.new(1,0,0,16), LayoutOrder = 0,
+}, sidebar)
+
+local holder = mk("Frame", {
+	Size = UDim2.new(1,-SW-20,1,-46), Position = UDim2.new(0,SW+16,0,40),
+	BackgroundTransparency = 1, BorderSizePixel = 0,
+}, win)
+
+local pages, sideBtns = {}, {}
+
+local function selectTab(name)
+	for k, pg in pairs(pages) do
+		pg.Visible = (k == name)
+		if sideBtns[k] then tw(sideBtns[k], { BackgroundColor3 = k == name and C.brand or C.alt }) end
+	end
+end
+
+local function addTab(name, order)
+	local sc = mk("ScrollingFrame", {
+		Size = UDim2.new(1,0,1,0), BackgroundTransparency = 1, BorderSizePixel = 0,
+		ScrollBarThickness = 5, ScrollBarImageColor3 = C.accent,
+		CanvasSize = UDim2.new(0,0,0,0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		ScrollingDirection = Enum.ScrollingDirection.Y, Visible = false,
+	}, holder)
+	mk("UIListLayout", { Padding = UDim.new(0,6), SortOrder = Enum.SortOrder.LayoutOrder }, sc)
+	mk("UIPadding", { PaddingTop = UDim.new(0,4), PaddingLeft = UDim.new(0,4), PaddingRight = UDim.new(0,8), PaddingBottom = UDim.new(0,8) }, sc)
+	pages[name] = sc
+	local b = mk("TextButton", {
+		Size = UDim2.new(1,0,0,34), BackgroundColor3 = order == 1 and C.brand or C.alt,
+		Text = name, TextSize = 12, TextColor3 = C.text, Font = Enum.Font.GothamBold,
+		BorderSizePixel = 0, LayoutOrder = order, AutoButtonColor = false,
+	}, sidebar)
+	rnd(b, 7) strk(b)
+	b.MouseButton1Click:Connect(function() selectTab(name) end)
+	sideBtns[name] = b
+	return sc
+end
+
+-- ================= TAB 1 =================
+local T1 = addTab("หลัก", 1)
+header(T1, "จุดฐาน")
+local pinReadout = readout(T1, "ยังไม่ได้ปักหมุดฐาน")
+btn(T1, "ปักหมุดฐาน", function()
+	refresh()
+	if not root then pinReadout:Set("ไม่เจอตัวละคร") return end
+	CFG.pin = root.CFrame
+	local p = root.Position
+	pinReadout:Set(string.format("ฐาน @ %d, %d, %d", math.floor(p.X), math.floor(p.Y), math.floor(p.Z)))
+end)
+btn(T1, "วาร์ปกลับฐาน", function()
+	if not CFG.pin then pinReadout:Set("ยังไม่ได้ปักหมุดฐาน") return end
+	task.spawn(goHome)
+end, Color3.fromRGB(26,118,195))
+header(T1, "ตัวละคร")
+togg(T1, "โดนตีไม่สะท้าน", true, function(v)
+	CFG.god = v
+	if not (hum and hum.Parent) then return end
+	for _, s in ipairs({ Enum.HumanoidStateType.Dead, Enum.HumanoidStateType.FallingDown, Enum.HumanoidStateType.Ragdoll }) do
+		pcall(function() hum:SetStateEnabled(s, not v) end)
+	end
+	if v then safeState(Enum.HumanoidStateType.Running) end
+end)
+togg(T1, "กัน AFK", true, function(v) CFG.antiAfk = v end)
+header(T1, "ความเร็วเดิน")
+local spdSlider = slider(T1, "ความเร็ว", 1, 10000, 16, 1, function(v)
+	CFG.spVal = v CFG.spOn = true
+	if hum and hum.Parent then hum.WalkSpeed = v end
+end)
+btn(T1, "ปิดความเร็ว (กลับ 16)", function()
+	CFG.spOn = false
+	if hum and hum.Parent then hum.WalkSpeed = 16 end
+	spdSlider.Set(16)
+end, C.off, 34)
+
+-- ================= TAB 2 =================
+local T2 = addTab("ไข่", 2)
+header(T2, "คำค้น")
+txtbox(T2, "egg", "ชื่อไข่ เช่น GoldenEgg", function(v) CFG.keyword = v end)
+header(T2, "สแกน")
+local eggReadout = readout(T2, "ยังไม่สแกน", C.dim)
+btn(T2, "สแกนไข่", function()
+	scanEggs()
+	if #eggs == 0 then eggReadout:Set("ไม่พบไข่ — ลองเปลี่ยนคำค้น") return end
+	eggReadout:Set(string.format("พบ %d ไข่ | ไกลสุด %s (%d)", #eggs, eggs[1].name, math.floor(eggs[1].distance)))
+end, Color3.fromRGB(28,130,90))
+header(T2, "บินไป")
+btn(T2, "บินไปไข่ที่ไกลที่สุด", function()
+	if #eggs == 0 then scanEggs() end
+	if #eggs == 0 then eggReadout:Set("ไม่พบไข่") return end
+	task.spawn(flyTo, eggs[1].position, CFG.liftCap)
+end, Color3.fromRGB(190,125,16))
+btn(T2, "บินไปไข่ใกล้สุด", function()
+	if #eggs == 0 then scanEggs() end
+	if #eggs == 0 then eggReadout:Set("ไม่พบไข่") return end
+	local e = nearestEgg()
+	if e then task.spawn(flyTo, e.position, CFG.liftCap) end
+end, Color3.fromRGB(150,110,20))
+togg(T2, "บินตามไข่ใกล้สุดอัตโนมัติ", false, function(v) CFG.follow = v end)
+header(T2, "ปรับการบิน")
+slider(T2, "ความสูงสูงสุด", 10, 200, 90, 5, function(v) CFG.liftCap = v end)
+slider(T2, "ตัวคูณความเร็วบิน", 1, 10, 3, 1, function(v) CFG.speedMul = v end)
+slider(T2, "ความสูงต่อระยะ", 0.02, 0.4, 0.12, 0.01, function(v) CFG.liftMul = v end)
+slider(T2, "ระยะรักษาการตามไข่", 10, 120, 30, 5, function(v) CFG.keepDist = v end)
+
+-- ================= LOOPS =================
+RunService.Heartbeat:Connect(function()
+	if not (hum and hum.Parent) then refresh() return end
+	if CFG.god and hum.Health < hum.MaxHealth then hum.Health = hum.MaxHealth end
+	if CFG.spOn and not flight.active then
+		hum.WalkSpeed = math.clamp(CFG.spVal, 1, 10000)
+	end
+end)
+
+plr.Idled:Connect(function()
+	if not CFG.antiAfk then return end
+	VirtualUser:CaptureController()
+	VirtualUser:ClickButton2(Vector2.new(0,0))
+end)
+
+task.spawn(function()
+	while task.wait(0.15) do
+		if not (CFG.follow and root and not flight.active) then continue end
+		if #eggs == 0 then
+			scanEggs()
+		else
+			local e = nearestEgg()
+			if e then
+				local d = (e.position - root.Position).Magnitude
+				if d > CFG.keepDist then
+					flyTo(e.position, CFG.liftCap)
+				end
+			else
+				scanEggs()
+			end
+		end
+	end
+end)
+
+pages["หลัก"].Visible = true
+
+print("==========================================")
+print(MAKER .. " loaded")
+print("แท็บ: หลัก / ไข่")
+print("ปุ่ม BZ มุมขวาบน = ปิด-เปิดหน้าต่าง")
+print("==========================================")
